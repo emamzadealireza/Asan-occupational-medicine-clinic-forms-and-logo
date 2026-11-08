@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-ربات تلگرام ساخت پیش‌فاکتور و فاکتور فروش — کلینیک طب کار آسان
+ربات پیش‌فاکتور و فاکتور فروش — کلینیک طب کار آسان
+(پلتفرم پیش‌فرض: بله/بأله بدون نیاز به فیلترشکن — هوی تلگرام هم پشتیبانی می‌شود)
 ===============================================================
 - بدون نیاز به نصب هیچ کتابخانه‌ای (فقط پایتون ۳.۸ به بالا)
 - پیام‌ها را با long polling می‌گیرد (نیازی به دامنه، سرور یا SSL ندارد)
 - خروجی: PDF مشابه نمونه (فارسی، راست‌به‌چپ، لوگو، اعداد فارسی)
 - تولید PDF با مرورگر Edge
+- پلتفرم: پیش‌فرض «بله» است؛ برای کار با تلگرام، در فایل platform.txt بنویسید: telegram
 
 راه‌اندازی:
-  1) توکن ربات را از @BotFather بگیرید و در فایل bot_token.txt (کنار همین فایل) قرار دهید.
-  2) اجرا:  python telegram_invoice_bot.py
-  3) در تلگرام به ربات پیام بدهید. /start را بزنید تا راهنمای قالب پیام را ببینید.
+  1) توکن ربات را از BotFather (در اپ «بله» یا تلگرام) بگیرید و در فایل bot_token.txt قرار دهید.
+  2) اجرا:  python invoice_bot.py
+  3) به ربات پیام بدهید. /start را بزنید تا راهنمای قالب پیام را ببینید.
 """
 
 import sys
@@ -43,8 +45,22 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "فاکتورهای-تولیدشده")
 TOKEN_FILE = os.path.join(BASE_DIR, "bot_token.txt")
 PROXY_FILE = os.path.join(BASE_DIR, "proxy.txt")
+PLATFORM_FILE = os.path.join(BASE_DIR, "platform.txt")
 
-API_BASE = "https://api.telegram.org"
+API_BASE_BALE = "https://tapi.bale.ai"        # بله — بدون نیاز به فیلترشکن (پیش‌فرض)
+API_BASE_TELEGRAM = "https://api.telegram.org"
+
+
+def api_base() -> str:
+    """پلتفرم ربات: بله (پیش‌فرض) یا تلگرام — با فایل platform.txt قابل تغییر"""
+    try:
+        with open(PLATFORM_FILE, "r", encoding="utf-8-sig") as f:
+            p = f.read().strip().lower()
+        if "telegram" in p:
+            return API_BASE_TELEGRAM
+    except OSError:
+        pass
+    return API_BASE_BALE
 
 LOGO_BASE64_PATHS = [
     os.path.join(BASE_DIR, "logo-final-with-text-base64.txt"),
@@ -153,18 +169,18 @@ def _socks_enable(url: str) -> None:
 
 
 def _opener_for(proxy_url):
+    if proxy_url is None:
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
     if proxy_url.startswith("socks"):
         _socks_enable(proxy_url)
         return urllib.request.build_opener()
-    if proxy_url is None:
-        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
     return urllib.request.build_opener(
         urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
 
 
 def _probe(opener) -> bool:
     try:
-        with opener.open(f"{API_BASE}/bot{bot_token()}/getMe", timeout=6) as resp:
+        with opener.open(f"{api_base()}/bot{bot_token()}/getMe", timeout=6) as resp:
             return bool(json.loads(resp.read().decode("utf-8")).get("ok"))
     except Exception:
         return False
@@ -198,7 +214,7 @@ def get_opener():
 
 
 def tg_get(method: str, params: dict, timeout: int):
-    url = f"{API_BASE}/bot{bot_token()}/{method}?" + urllib.parse.urlencode(params)
+    url = f"{api_base()}/bot{bot_token()}/{method}?" + urllib.parse.urlencode(params)
     try:
         with get_opener().open(url, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
@@ -220,7 +236,7 @@ def tg_send_message(chat_id: int, text: str):
 
 
 def tg_send_document(chat_id: int, path: str, caption: str = ""):
-    url = f"{API_BASE}/bot{bot_token()}/sendDocument"
+    url = f"{api_base()}/bot{bot_token()}/sendDocument"
     boundary = "----AsanBot" + uuid.uuid4().hex
     filename = os.path.basename(path)
     with open(path, "rb") as f:
@@ -653,7 +669,7 @@ HELP_TEXT = """🧾 <b>ربات پیش‌فاکتور و فاکتور — طب �
 • هر خطی که کلید نباشد، در بخش «توضیحات تکمیلی» فاکتور نمایش داده می‌شود — پس هر توضیح اضافه‌ای آزادانه بنویسید
 • اعداد را با هر نویسه‌ای می‌توانید بنویسید (فارسی/انگلیسی، با یا بدون جداکننده)
 
-سند PDF هم در تلگرام به شما ارسال می‌شود و هم در پوشه «فاکتورهای-تولیدشده» کنار اسکریپت ذخیره می‌شود."""
+سند PDF هم در همین چت به شما ارسال می‌شود و هم در پوشه «فاکتورهای-تولیدشده» کنار اسکریپت ذخیره می‌شود."""
 
 
 # ----------------------------------------------------------------------
@@ -703,7 +719,7 @@ def main():
         if not os.path.exists(TOKEN_FILE):
             with open(TOKEN_FILE, "w", encoding="utf-8") as f:
                 f.write("")
-        print("3) دوباره این اسکریپت را اجرا کنید:  python telegram_invoice_bot.py")
+        print("3) دوباره این اسکریپت را اجرا کنید:  python invoice_bot.py")
         print("=" * 56)
         return
 
