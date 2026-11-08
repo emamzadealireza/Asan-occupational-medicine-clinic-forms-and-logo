@@ -867,6 +867,27 @@ def handle_message(msg: dict, offset_holder: list):
 
 
 def main():
+    # جلوگیری از اجرای هم‌زمان چند نمونه ربات
+    LOCK_FILE = os.path.join(BASE_DIR, "bot.lock")
+    import ctypes
+    try:
+        if os.path.exists(LOCK_FILE):
+            with open(LOCK_FILE, "r", encoding="utf-8-sig") as f:
+                old_pid = int((f.read().strip() or "0").split(".")[0] or 0)
+            alive = False
+            if old_pid:
+                h = ctypes.windll.kernel32.OpenProcess(0x1000, False, old_pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+                if h:
+                    ctypes.windll.kernel32.CloseHandle(h)
+                    alive = True
+            if alive and old_pid != os.getpid():
+                print("ربات از قبل در حال اجراست (PID " + str(old_pid) + ") — این نمونه بسته شد.")
+                return
+        with open(LOCK_FILE, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except Exception as e:
+        print("lock error:", repr(e))
+
     if not os.path.exists(TOKEN_FILE) or not bot_token():
         print("=" * 56)
         print("توکن ربات تنظیم نشده است.")
@@ -905,6 +926,10 @@ def main():
                         pass
         except KeyboardInterrupt:
             print("ربات متوقف شد.")
+            try:
+                os.remove(LOCK_FILE)
+            except OSError:
+                pass
             return
         except Exception as loop_err:
             print("loop error:", repr(loop_err))
