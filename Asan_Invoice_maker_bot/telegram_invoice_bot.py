@@ -24,16 +24,25 @@ import html
 import json
 import os
 import re
+import socket as _socket
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 
+try:
+    import socks as _socks_mod
+    _SOCKS_READY = True
+except Exception:
+    _SOCKS_READY = False
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "فاکتورهای-تولیدشده")
 TOKEN_FILE = os.path.join(BASE_DIR, "bot_token.txt")
+PROXY_FILE = os.path.join(BASE_DIR, "proxy.txt")
 
 API_BASE = "https://api.telegram.org"
 
@@ -103,10 +112,99 @@ def bot_token() -> str:
     return _TOKEN_CACHE
 
 
+# ----------------------------------------------------------------------
+# تشخیص خودکار پروکسی/VPN و اتصال
+# ----------------------------------------------------------------------
+_SOCKS_ACTIVE_URL = None
+_OPENER = None
+_COMMON_PORTS = (10809, 10808, 7890, 7897, 2080, 8118, 3128, 8890)
+
+
+def _proxy_candidates():
+    cands = []
+    if os.path.exists(PROXY_FILE):
+        try:
+            with open(PROXY_FILE, "r", encoding="utf-8-sig") as f:
+                for line in f.read().strip().splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        cands.append(line if "://" in line else "http://" + line)
+        except OSError:
+            pass
+    for port in _COMMON_PORTS:
+        cands.append(f"http://127.0.0.1:{port}")
+        if _SOCKS_READY:
+            cands.append(f"socks5h://127.0.0.1:{port}")
+    return cands
+
+
+def _socks_enable(url: str) -> None:
+    """فعال‌سازی پروکسی SOCKS برای کل پروسه (نیازمند pysocks)"""
+    global _SOCKS_ACTIVE_URL
+    if _SOCKS_ACTIVE_URL == url:
+        return
+    m = re.match(r"socks5h?://([^:/]+):(\d+)", url)
+    if not m:
+        raise ValueError(f"آدرس پروکسی نامعتبر: {url}")
+    host, port = m.group(1), int(m.group(2))
+    _socks_mod.socks.setdefaultproxy(_socks_mod.socks.PROXY_TYPE_SOCKS5, host, port, rdns=True)
+    _socket.socket = _socks_mod.socksocket
+    _SOCKS_ACTIVE_URL = url
+
+
+def _opener_for(proxy_url):
+    if proxy_url.startswith("socks"):
+        _socks_enable(proxy_url)
+        return urllib.request.build_opener()
+    if proxy_url is None:
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+
+
+def _probe(opener) -> bool:
+    try:
+        with opener.open(f"{API_BASE}/bot{bot_token()}/getMe", timeout=6) as resp:
+            return bool(json.loads(resp.read().decode("utf-8")).get("ok"))
+    except Exception:
+        return False
+
+
+def reset_opener():
+    global _OPENER
+    _OPENER = None
+
+
+def get_opener():
+    """اول برقراری مستقیم، بعد پروکسی‌های رایج محلی را امتحان می‌کند"""
+    global _OPENER
+    if _OPENER is not None:
+        return _OPENER
+    direct = _opener_for(None)
+    if _probe(direct):
+        _OPENER = direct
+        return _OPENER
+    for c in _proxy_candidates():
+        try:
+            opener = _opener_for(c)
+        except Exception:
+            continue
+        if _probe(opener):
+            print(f"اتصال از طریق پروکسی: {c}")
+            _OPENER = opener
+            return _OPENER
+    # هیچ مسیری موفق نبود — مستقیم برمی‌گردیم تا دوباره تلاش شود
+    return direct
+
+
 def tg_get(method: str, params: dict, timeout: int):
     url = f"{API_BASE}/bot{bot_token()}/{method}?" + urllib.parse.urlencode(params)
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
+    try:
+        with get_opener().open(url, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError):
+        reset_opener()   # دفعه بعد مسیر اتصال دوباره بررسی می‌شود
+        raise
     if not payload.get("ok"):
         raise RuntimeError(f"Telegram API error: {payload}")
     return payload["result"]
@@ -148,8 +246,12 @@ def tg_send_document(chat_id: int, path: str, caption: str = ""):
 
     req = urllib.request.Request(url, data=payload)
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        result = json.loads(resp.read().decode("utf-8"))
+    try:
+        with get_opener().open(req, timeout=120) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError):
+        reset_opener()
+        raise
     if not result.get("ok"):
         raise RuntimeError(f"sendDocument failed: {result}")
 
