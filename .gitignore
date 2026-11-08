@@ -1,4 +1,8 @@
 # Top secret — never publish (contains bot token)
 Asan_Invoice_maker_bot/bot_token.txt
+Asan_Invoice_maker_bot/bot_token_telegram.txt
 # personal data saved per user (seller profiles)
 Asan_Invoice_maker_bot/profiles.json
+# runtime junk
+Asan_Invoice_maker_bot/__pycache__/
+Asan_Invoice_maker_bot/bot.log
