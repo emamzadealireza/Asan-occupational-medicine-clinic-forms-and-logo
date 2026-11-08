@@ -47,6 +47,7 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "فاکتورهای-تولیدشده")
 TOKEN_FILE = os.path.join(BASE_DIR, "bot_token.txt")
 PROXY_FILE = os.path.join(BASE_DIR, "proxy.txt")
 PLATFORM_FILE = os.path.join(BASE_DIR, "platform.txt")
+PROFILES_FILE = os.path.join(BASE_DIR, "profiles.json")
 
 API_BASE_BALE = "https://tapi.bale.ai"        # بله — بدون نیاز به فیلترشکن (پیش‌فرض)
 API_BASE_TELEGRAM = "https://api.telegram.org"
@@ -223,7 +224,7 @@ def tg_get(method: str, params: dict, timeout: int):
         reset_opener()   # دفعه بعد مسیر اتصال دوباره بررسی می‌شود
         raise
     if not payload.get("ok"):
-        raise RuntimeError(f"Telegram API error: {payload}")
+        raise RuntimeError(f"{api_base()} API error: {payload}")
     return payload["result"]
 
 
@@ -231,8 +232,6 @@ def tg_send_message(chat_id: int, text: str):
     tg_get("sendMessage", {
         "chat_id": str(chat_id),
         "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": "true",
     }, 30)
 
 
@@ -316,12 +315,15 @@ def parse_invoice_text(raw: str) -> dict:
         "date": "",
         "number": "",
         "seller": {**SELLER_DEFAULT},
+        "seller_overrides": {},   # کلیدهای صریح فروشنده در همین پیام
         "buyer": {**NEW_PARTY},
         "items": [],   # (name, desc, qty, unit_price)
+        "slots": {},   # شماره ردیف → {"name","desc","qty","unit"}
         "discount": 0.0,
         "vat": 0.0,
         "notes": [],   # توضیحات آزاد کاربر
     }
+    last_idx = [0]  # آخرین شماره ردیف فعال برای کلیدهای بدون شماره
 
     for rawline in raw.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         line = rawline.strip()
@@ -353,23 +355,35 @@ def parse_invoice_text(raw: str) -> dict:
             inv["number"] = value
             continue
 
-        if k_ns in ITEM_KEYS:
-            parts = [p.strip() for p in re.split(r"\s*[|｜]\s*", value) if p.strip()]
-            try:
-                if len(parts) >= 4:
-                    name, desc = parts[0], parts[1]
-                    qty = parse_amount(parts[2]) or 1.0
-                    unit = parse_amount(parts[3]) or 0.0
-                elif len(parts) == 3:
-                    name = parts[0]
-                    qty = parse_amount(parts[1]) or 1.0
-                    unit = parse_amount(parts[2]) or 0.0
-                    desc = ""
-                else:
-                    name, desc, qty, unit = parts[0], "", 1.0, parse_amount(parts[1] if len(parts) > 1 else "") or 0.0
-            except Exception:
-                name, desc, qty, unit = value, "", 1.0, 0.0
-            inv["items"].append((name, desc, qty, unit))
+        mat = re.match(r"^(کالایاخدمات|کالا|محصول|خدمت|خدمات|مورد|قیمتواحد|قیمت|شرح|تعداد)(\d*)$", k_ns)
+        if mat:
+            base_key, idx_s = mat.group(1), mat.group(2)
+            fname = {"شرح": "desc", "تعداد": "qty", "قیمت": "unit", "قیمتواحد": "unit"}.get(base_key, "name")
+            if idx_s:
+                idx = int(idx_s)
+                last_idx[0] = idx
+            elif fname == "name" or not inv["slots"] or last_idx[0] not in inv["slots"]:
+                idx = (max(inv["slots"]) + 1) if inv["slots"] else 1
+                last_idx[0] = idx
+            else:
+                idx = last_idx[0]
+            slot = inv["slots"].setdefault(idx, {})
+            if fname == "name":
+                parts = [p.strip() for p in re.split(r"\s*[|｜]\s*", value) if p.strip()]
+                slot["name"] = parts[0]
+                if len(parts) == 3:
+                    slot["qty"] = parse_amount(parts[1]) or 1.0
+                    slot["unit"] = parse_amount(parts[2]) or 0.0
+                elif len(parts) >= 4:
+                    slot["desc"] = parts[1]
+                    slot["qty"] = parse_amount(parts[2]) or 1.0
+                    slot["unit"] = parse_amount(parts[3]) or 0.0
+            elif fname == "desc":
+                slot["desc"] = value
+            elif fname == "qty":
+                slot["qty"] = parse_amount(value) or 1.0
+            elif fname == "unit":
+                slot["unit"] = parse_amount(value) or 0.0
             continue
 
         if k_ns == "تخفیف" or k_ns.endswith("تخفیف"):
@@ -404,12 +418,16 @@ def parse_invoice_text(raw: str) -> dict:
             field_key_ns = field_key.replace(" ", "").lower()
             if not field_key_ns:
                 inv[party]["name"] = value
+                if party == "seller":
+                    inv["seller_overrides"]["name"] = value
                 continue
             matched = False
             for fkey, fname in PARTY_FIELDS.items():
                 fk = normalize_digits(fkey).replace("\u200c", "").replace("ی", "ی").replace("ک", "ک").replace(" ", "").lower()
                 if field_key_ns == fk:
                     inv[party][fname] = value
+                    if party == "seller":
+                        inv["seller_overrides"][fname] = value
                     matched = True
                     break
             if not matched:
@@ -423,6 +441,18 @@ def parse_invoice_text(raw: str) -> dict:
             continue
 
         inv["notes"].append(line)
+
+    # تبدیل ردیف‌ها به آیتم‌های نهایی به ترتیب شماره
+    final_items = []
+    for idx in sorted(inv["slots"]):
+        s = inv["slots"][idx]
+        name = s.get("name") or ""
+        desc = s.get("desc") or ""
+        qty = s.get("qty") if s.get("qty") is not None else 1.0
+        unit = s.get("unit") or 0.0
+        if name or desc:
+            final_items.append((name, desc, qty, unit))
+    inv["items"] = final_items
 
     return inv
 
@@ -657,34 +687,28 @@ def archive_pdf_to_git(pdf_path: str, kind: str, date_str: str) -> None:
 # ----------------------------------------------------------------------
 # پیام راهنما
 # ----------------------------------------------------------------------
-HELP_TEXT = """🧾 <b>ربات پیش‌فاکتور و فاکتور — طب کار آسان</b>
+HELP_TEXT = """🧾 ساخت پیش‌فاکتور و فاکتور فروش
 
-اطلاعات فاکتور را در <b>یک پیام</b> بفرستید. قالب:
+همه اطلاعات را در یک پیام بفرستید، مثل این:
 
-<pre>نوع: پیش فاکتور
+نوع: پیش فاکتور
 تاریخ: ۱۴۰۵/۰۸/۰۷
-خریدار: شرکت خدمات مهندسی شهرک
-خریدار شناسه: ۱۴۰۶۴۸۸۷۷۲۹
-خریدار شماره اقتصادی: ۴۱۱۴۱۸۱۰۵۹۷۹
-خریدار کد پستی: ۱۸۳۴۱۸۵۰۹۳۱
-خریدار نشانی: تهران - کیلومتر ۴۰ آزادراه تهران-قم، محور شهر صنعتی شمس آباد
-کالا: معاینات بدو استخدام | (طب کار) کارکنان آتش نشانی | ۲۹ | ۳٬۸۷۲٬۰۰۰
-تخفیف: ۰
-مالیات بر ارزش افزوده: ۰
-توضیح: هر متن اضافه‌ای که می‌خواهید در فاکتور درج شود.</pre>
+خریدار: اسم شرکت یا شخص
+کالا ۱: معاینات بدو استخدام
+شرح ۱: (طب کار) کارکنان آتش نشانی
+تعداد ۱: ۲۹
+قیمت واحد ۱: ۳٬۸۷۲٬۰۰۰
 
-<b>قواعد:</b>
-• <code>نوع</code>: <code>پیش فاکتور</code> یا <code>فاکتور</code> (بدون این کلید، پیش‌فاکتور ساخته می‌شود)
-• <code>کالا</code>: چهار بخش با <code>|</code> → نام | شرح | تعداد | قیمت واحد
-   بدون شرح: <code>نام | تعداد | قیمت</code>
-   می‌توانید چند خط <code>کالا</code> بفرستید
-• <code>خریدار</code>: اسم را جلوی <code>خریدار:</code> بنویسید؛ بقیه موارد (شناسه، شماره اقتصادی، کد پستی، نشانی، شماره تماس) همه اختیاری‌اند
-• اطلاعات فروشنده از قبل (طب کار آسان) درج می‌شود؛ برای تغییر، همان کلیدها را با پیشوند <code>فروشنده</code> بفرستید
-• <code>تخفیف</code> و <code>مالیات بر ارزش افزوده</code> اختیاری‌اند
-• هر خطی که کلید نباشد، در بخش «توضیحات تکمیلی» فاکتور نمایش داده می‌شود — پس هر توضیح اضافه‌ای آزادانه بنویسید
-• اعداد را با هر نویسه‌ای می‌توانید بنویسید (فارسی/انگلیسی، با یا بدون جداکننده)
-
-سند PDF هم در همین چت به شما ارسال می‌شود و هم در پوشه «فاکتورهای-تولیدشده» کنار اسکریپت ذخیره می‌شود."""
+نکته‌ها:
+• «شرح»، «تعداد» و «کد پستی» و… همه اختیاری‌اند.
+• برای ردیف دوم شماره اضافه کنید: کالا ۲: … تعداد ۲: … قیمت واحد ۲: …
+• «تخفیف» و «مالیات بر ارزش افزوده» هم اختیاری‌اند.
+• جلوی «توضیح:» هر متنی بنویسید؛ و هر خطی که کلید نباشد، به بخش «توضیحات تکمیلی» فاکتور می‌رود.
+• اطلاعات فروشنده پیش‌فرض طب کار آسان است؛ برای تغییر یک بار بنویسید، مثل:
+  فروشنده: اسم شرکت شما
+  فروشنده شماره تماس: ۰۹…
+  ذخیره می‌شود و دفعات بعد تکرار لازم نیست.
+• بعد از ارسال، PDF در همین چت فرستاده می‌شود."""
 
 
 # ----------------------------------------------------------------------
@@ -707,6 +731,35 @@ def handle_message(msg: dict, offset_holder: list):
         tg_send_message(chat_id, "اطلاعاتی در پیام پیدا نشد. برای دیدن قالب، /help را بفرستید.")
         return
 
+    # اطلاعات فروشنده: پروفایل شخصی هر کاربر + تغییرات صریح همین پیام
+    profile = dict(SELLER_DEFAULT)
+    if os.path.exists(PROFILES_FILE):
+        try:
+            with open(PROFILES_FILE, "r", encoding="utf-8-sig") as f:
+                profiles = json.load(f)
+            saved = profiles.get(str(chat_id))
+            if isinstance(saved, dict) and saved:
+                profile = saved
+        except Exception:
+            pass
+    if inv["seller_overrides"]:
+        profile = {**profile, **inv["seller_overrides"]}
+        try:
+            profiles = {}
+            if os.path.exists(PROFILES_FILE):
+                with open(PROFILES_FILE, "r", encoding="utf-8-sig") as f:
+                    profiles = json.load(f)
+            profiles[str(chat_id)] = profile
+            with open(PROFILES_FILE, "w", encoding="utf-8") as f:
+                json.dump(profiles, f, ensure_ascii=False, indent=1)
+            tg_send_message(
+                chat_id,
+                "✔ اطلاعات فروشنده برای پیام‌های بعدی شما ذخیره شد.",
+            )
+        except Exception as e:
+            print("profile save error:", repr(e))
+    inv["seller"] = profile
+
     html_text = build_html(inv)
     total = sum(q * u for _, _, q, u in inv["items"])
     base_name = sanitize_filename(inv["kind"].replace("\u200c", "")) + "-" + \
@@ -715,8 +768,8 @@ def handle_message(msg: dict, offset_holder: list):
     pdf_from_html(html_text, out_pdf)
 
     caption = (
-        f"<b>{html.escape(inv['kind'])}</b>"
-        + (f" — {html.escape(inv['date'])}" if inv["date"] else "")
+        inv["kind"]
+        + (f" — {inv['date']}" if inv["date"] else "")
         + f"\nجمع کل: {fmt_amount(total)} تومان"
         + f"\nمبلغ قابل پرداخت: {fmt_amount(total + inv['vat'] - inv['discount'])} تومان"
     )
@@ -728,7 +781,7 @@ def main():
     if not os.path.exists(TOKEN_FILE) or not bot_token():
         print("=" * 56)
         print("توکن ربات تنظیم نشده است.")
-        print("1) در تلگرام به  @BotFather  پیام دهید و /newbot را بزنید.")
+        print("1) در اپ بله به @BotFather پیام دهید و /newbot را بزنید.")
         print("2) توکن دریافتی (به شکل 123456:AAA... ) را")
         print("   داخل این فایل بگذارید و ذخیره کنید:")
         print("   " + TOKEN_FILE)

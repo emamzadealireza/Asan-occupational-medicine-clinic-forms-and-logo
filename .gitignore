@@ -1,2 +1,4 @@
 # Top secret — never publish (contains bot token)
 Asan_Invoice_maker_bot/bot_token.txt
+# personal data saved per user (seller profiles)
+Asan_Invoice_maker_bot/profiles.json
