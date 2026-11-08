@@ -13,6 +13,13 @@
   3) در تلگرام به ربات پیام بدهید. /start را بزنید تا راهنمای قالب پیام را ببینید.
 """
 
+import sys
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 import html
 import json
 import os
