@@ -304,9 +304,78 @@ PARTY_FIELDS = {
     "موبایل": "phone",
 }
 
-ITEM_KEYS = {"کالا", "کالا یا خدمات", "محصول", "خدمت", "خدمات", "مورد"}
+ITEM_KEYS = {"کالاجانبی", "کالا", "محصول", "خدمت", "خدمات", "مورد"}
 
 KEY_REGEX = re.compile(r"^\s*([^:：]+?)\s*[:：]\s*(.*)$")
+
+# ----------------------------------------------------------------------
+# تطبیق هوشمند کلیدها (خطای تایپی یا ترتیب متفاوت)
+# ----------------------------------------------------------------------
+KNOWN_FIELD_KEYS = None  # ساخته می‌شود در اولین فراخوانی
+
+
+def _lev(a: str, b: str) -> int:
+    """فاصله ادیت (Levenshtein) ساده"""
+    if len(a) < len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def _norm_key(s: str) -> str:
+    s = normalize_digits(s)
+    for a, b in (("ي", "ی"), ("ك", "ک"), ("ة", "ه"), ("أ", "ا"), ("إ", "ا"), ("ٱ", "ا"), ("ؤ", "و"), ("ئ", "ی")):
+        s = s.replace(a, b)
+    return s.replace("\u200c", "").replace(" ", "").lower()
+
+
+def _candidate_keys():
+    global KNOWN_FIELD_KEYS
+    if KNOWN_FIELD_KEYS is not None:
+        return KNOWN_FIELD_KEYS
+    out = []
+    core = ("نوع", "تاریخ", "شماره", "شمارهفاکتور", "شمارهسند", "تخدیف",
+            "مالیات", "مالیاتبرارزشافزوده", "توضیج", "توضیحات", "یادداشت", "متناضافه")
+    out += list(core)
+    for p in ("فروشنده", "خریدار"):
+        out.append(p)
+        for f in PARTY_FIELDS:
+            fn = _norm_key(f)
+            out.append(p + fn)     # «شناسهخریدار»
+            out.append(fn + p)     # «شناسهخریدار» (ترتیب کمی متفاوت)
+    out = list(dict.fromkeys(out))
+    KNOWN_FIELD_KEYS = out
+    return out
+
+
+def _canonical_key(k_ns: str) -> str:
+    """کلید نزدیک‌ترین شکل استاندارد (در حد خطای تایپی) را برمی‌گرداند"""
+    if not k_ns:
+        return k_ns
+    # کلیدهای کالا ممکن است شماره‌دار باشند: «کالا12»
+    m = re.match(r"^(.*?)(\d*)$", k_ns)
+    body, digits = m.group(1), m.group(2)
+    item_best, item_d = None, 99
+    for t in ("کالایاخدمات", "کالا", "محصول", "خدمت", "خدمات", "مورد", "شرح", "تعداد", "قیمتواحد", "قیمت"):
+        d = _lev(body, t)
+        if d < item_d:
+            item_best, item_d = t, d
+    if item_best and item_d <= 1 and (body == item_best or item_d <= 1):
+        return item_best + digits
+    best, best_d = k_ns, 99
+    for c in _candidate_keys():
+        d = _lev(k_ns, c)
+        if d < best_d:
+            best, best_d = c, d
+    tol = 1 if (best and len(best) <= 6) else 2
+    if best and best_d <= tol:
+        return best
+    return k_ns
 
 
 def parse_invoice_text(raw: str) -> dict:
@@ -336,8 +405,8 @@ def parse_invoice_text(raw: str) -> dict:
             continue
 
         key, value = m.group(1).strip(), m.group(2).strip()
-        k = normalize_digits(key).replace("\u200c", "").replace("ی", "ی").replace("ک", "ک").strip()
-        k_ns = k.replace(" ", "")
+        k_ns = _canonical_key(_norm_key(key))
+        k = k_ns
 
         if k_ns in ("نوع",):
             v = normalize_digits(value)
@@ -399,32 +468,30 @@ def parse_invoice_text(raw: str) -> dict:
             continue
 
         # کلید بدون پیشوند فروشنده/خریدار (مثل «کد پستی») → خریدار
-        field = None
-        for fkey, fname in PARTY_FIELDS.items():
-            fk = normalize_digits(fkey).replace("\u200c", "").replace(" ", "").lower()
-            if k_ns == fk:
-                field = fname
-                break
-        if field:
-            inv["buyer"][field] = value
-            continue
-
-        if k_ns.startswith("فروشنده") or k_ns.startswith("خرید"):
-            if k_ns.startswith("فروشنده"):
-                party, role_len = "seller", len("فروشنده")
-            else:
-                party, role_len = "buyer", len("خریدار")
-            field_key = k[role_len:].strip().lstrip("-_ ").strip()
-            field_key_ns = field_key.replace(" ", "").lower()
-            if not field_key_ns:
+        # کلیدهای طرفین؛ هر دو ترتیب پذیرفته می‌شود:
+        # «شناسه خریدار» / «خریدار شناسه» / «نشانی خریدار» / «شناسه» / «فروشنده:» / ...
+        fk_norm = lambda s: normalize_digits(s).replace("\u200c", "").replace(" ", "").replace("ی", "ی").replace("ک", "ک").lower()
+        party = None
+        rest = k_ns
+        if "فروشنده" in k_ns:
+            party, rest = "seller", k_ns.replace("فروشنده", "")
+        elif "خریدار" in k_ns:
+            party, rest = "buyer", k_ns.replace("خریدار", "")
+        else:
+            for fkey, fname in PARTY_FIELDS.items():
+                if k_ns == fk_norm(fkey):
+                    party, rest = "buyer", k_ns
+                    break
+        if party:
+            rest_ns = rest.replace(" ", "").strip("-_")
+            if not rest_ns:
                 inv[party]["name"] = value
                 if party == "seller":
                     inv["seller_overrides"]["name"] = value
                 continue
             matched = False
             for fkey, fname in PARTY_FIELDS.items():
-                fk = normalize_digits(fkey).replace("\u200c", "").replace("ی", "ی").replace("ک", "ک").replace(" ", "").lower()
-                if field_key_ns == fk:
+                if rest_ns == fk_norm(fkey):
                     inv[party][fname] = value
                     if party == "seller":
                         inv["seller_overrides"][fname] = value
@@ -447,11 +514,22 @@ def parse_invoice_text(raw: str) -> dict:
     for idx in sorted(inv["slots"]):
         s = inv["slots"][idx]
         name = s.get("name") or ""
+        if not name:
+            # ردیف بدون نام؛ برای از دست نرفتن اطلاعات به توضیحات می‌رود
+            bits = []
+            if s.get("desc"):
+                bits.append(s["desc"])
+            if s.get("qty") is not None:
+                bits.append("تعداد: " + fmt_amount(s["qty"]))
+            if s.get("unit"):
+                bits.append("قیمت واحد: " + fmt_amount(s["unit"]))
+            if bits:
+                inv["notes"].append("ردیف " + to_persian_digits(str(idx)) + ": " + " | ".join(bits))
+            continue
         desc = s.get("desc") or ""
         qty = s.get("qty") if s.get("qty") is not None else 1.0
         unit = s.get("unit") or 0.0
-        if name or desc:
-            final_items.append((name, desc, qty, unit))
+        final_items.append((name, desc, qty, unit))
     inv["items"] = final_items
 
     return inv
