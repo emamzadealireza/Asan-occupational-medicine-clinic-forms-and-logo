@@ -29,6 +29,7 @@ import re
 import socket as _socket
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -639,6 +640,20 @@ def sanitize_filename(s: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', "-", str(s)).strip() or "فاکتور"
 
 
+def archive_pdf_to_git(pdf_path: str, kind: str, date_str: str) -> None:
+    """PDF تولیدشده را در مخزن گیت (GitHub) ثبت و ارسال می‌کند - بدون توقف چت"""
+    def work():
+        try:
+            rel = os.path.relpath(pdf_path, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            subprocess.run(["git", "add", rel], cwd=BASE_DIR, capture_output=True, timeout=60)
+            msg = f"فاکتور جدید: {kind} - {date_str} - {time.strftime('%Y-%m-%d %H:%M')}"
+            subprocess.run(["git", "commit", "-m", msg], cwd=BASE_DIR, capture_output=True, timeout=60)
+            subprocess.run(["git", "push", "origin"], cwd=BASE_DIR, capture_output=True, timeout=120)
+        except Exception as e:
+            print("archive error:", repr(e))
+    threading.Thread(target=work, daemon=True).start()
+
+
 # ----------------------------------------------------------------------
 # پیام راهنما
 # ----------------------------------------------------------------------
@@ -706,6 +721,7 @@ def handle_message(msg: dict, offset_holder: list):
         + f"\nمبلغ قابل پرداخت: {fmt_amount(total + inv['vat'] - inv['discount'])} تومان"
     )
     tg_send_document(chat_id, out_pdf, caption=caption)
+    archive_pdf_to_git(out_pdf, inv["kind"], inv["date"] or "بدون-تاریخ")
 
 
 def main():
