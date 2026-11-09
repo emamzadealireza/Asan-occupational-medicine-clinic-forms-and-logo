@@ -573,14 +573,14 @@ def build_html(inv: dict) -> str:
     num_html = f'<div class="num">شماره : {esc(inv["number"])}</div>' if inv["number"] else ""
     date_html = f'<div class="num">{date_html}</div>' if date_html else ""
 
-    def party_html(p: dict) -> str:
+    def party_html(p: dict, econ_label: str = "شماره اقتصادی") -> str:
         id_line = f"<span><span class='klabel'>شناسه / شماره ملی : </span>{esc(p['id'] or '-')}</span>"
         tel_line = f"<span><span class='klabel'>شماره تماس : </span>{esc(p['phone'] or '-')}</span>"
         return (
             f"<span class='klabel'>{esc(p['name'])}</span><br>"
             f"{id_line}"
             f"<span style='display:inline-block;width:10mm'></span>"
-            f"<span><span class='klabel'>شماره اقتصادی : </span>{esc(p['economic'] or '-')}</span>"
+            f"<span><span class='klabel'>{econ_label} : </span>{esc(p['economic'] or '-')}</span>"
             f"<span style='display:inline-block;width:10mm'></span>"
             f"<span><span class='klabel'>کد پستی : </span>{esc(p['postal'] or '-')}</span><br>"
             f"{tel_line}"
@@ -641,7 +641,7 @@ def build_html(inv: dict) -> str:
     <tr class="section-title"><td>مشخصات فروشنده</td></tr>
   </table>
   <table class="kv">
-    <tr><td class="k">نام شرکت یا مجموعه : </td><td class="v">{party_html(s)}</td></tr>
+    <tr><td class="k">نام : </td><td class="v">{party_html(s, 'شماره مطب')}</td></tr>
     <tr><td class="k">نشانی : </td><td class="v" style="text-align:justify">{esc(s['address'] or '-')}</td></tr>
   </table>
 
@@ -649,7 +649,7 @@ def build_html(inv: dict) -> str:
     <tr class="section-title"><td>مشخصات خریدار</td></tr>
   </table>
   <table class="kv">
-    <tr><td class="k">نام شرکت یا مجموعه : </td><td class="v">{party_html(b) if b['name'] else '-'}</td></tr>
+    <tr><td class="k">نام : </td><td class="v">{party_html(b) if b['name'] else '-'}</td></tr>
     <tr><td class="k">نشانی : </td><td class="v" style="text-align:justify">{esc(b['address'] or '-')}</td></tr>
   </table>
 
