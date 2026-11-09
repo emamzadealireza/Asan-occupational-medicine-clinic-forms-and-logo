@@ -641,7 +641,7 @@ def build_html(inv: dict) -> str:
     <tr class="section-title"><td>مشخصات فروشنده</td></tr>
   </table>
   <table class="kv">
-    <tr><td class="k">نام : </td><td class="v">{party_html(s, 'شماره مطب')}</td></tr>
+    <tr><td class="k">نام : </td><td class="v">{party_html(s, 'شماره پروانه')}</td></tr>
     <tr><td class="k">نشانی : </td><td class="v" style="text-align:justify">{esc(s['address'] or '-')}</td></tr>
   </table>
 
@@ -820,8 +820,10 @@ def handle_message(msg: dict, offset_holder: list):
         tg_send_message(chat_id, "اطلاعاتی در پیام پیدا نشد. برای دیدن قالب، /help را بفرستید.")
         return
 
-    # اطلاعات فروشنده: پروفایل شخصی هر کاربر + تغییرات صریح همین پیام
-    profile = dict(SELLER_DEFAULT)
+    # اطلاعات فروشنده: پروفایل شخصی هر کاربر
+    # پیش‌فرض کامل فقط برای مالک ربات (کلینیک)؛ کاربران دیگر با مشخصات خالی شروع می‌کنند
+    OWNER_CHAT_ID = "118587168"
+    profile = {}
     if os.path.exists(PROFILES_FILE):
         try:
             with open(PROFILES_FILE, "r", encoding="utf-8-sig") as f:
@@ -831,6 +833,8 @@ def handle_message(msg: dict, offset_holder: list):
                 profile = saved
         except Exception:
             pass
+    if not profile and str(chat_id) == OWNER_CHAT_ID:
+        profile = dict(SELLER_DEFAULT)
     if inv["seller_overrides"]:
         profile = {**profile, **inv["seller_overrides"]}
         try:
