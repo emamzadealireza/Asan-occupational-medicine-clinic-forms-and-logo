@@ -491,6 +491,7 @@ def parse_invoice_text(raw: str) -> dict:
                     inv["seller_overrides"]["name"] = value
                 continue
             matched = False
+            # تطبیق مستقیم؛ در غیر این صورت جدا کردن با / یا - و تطبیق هر اصطلاح
             for fkey, fname in PARTY_FIELDS.items():
                 if rest_ns == fk_norm(fkey):
                     inv[party][fname] = value
@@ -498,6 +499,20 @@ def parse_invoice_text(raw: str) -> dict:
                         inv["seller_overrides"][fname] = value
                     matched = True
                     break
+            if not matched:
+                frag_re = re.split(r"[/\\،,؛\-\u2013\u2014_]", rest_ns)
+                for frag in frag_re:
+                    if not frag:
+                        continue
+                    for fkey, fname in PARTY_FIELDS.items():
+                        if frag == fk_norm(fkey):
+                            inv[party][fname] = value
+                            if party == "seller":
+                                inv["seller_overrides"][fname] = value
+                            matched = True
+                            break
+                    if matched:
+                        break
             if not matched:
                 inv["notes"].append(line)
             continue
@@ -540,7 +555,8 @@ def parse_invoice_text(raw: str) -> dict:
 # ساخت HTML
 # ----------------------------------------------------------------------
 def esc(s: str) -> str:
-    return html.escape(str(s), quote=False)
+    """escape + تبدیل همه ارقام به فارسی برای نمایش یکدست"""
+    return fa_digits(html.escape(str(s), quote=False))
 
 
 def build_html(inv: dict) -> str:
